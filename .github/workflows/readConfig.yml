@@ -1,0 +1,23 @@
+name: 读取action secret
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    if: github.event.repository.owner.id == github.event.sender.id
+    steps:
+    - uses: actions/checkout@v2
+    - name: 初始化Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: 3.9.1
+    - name: 配置环境
+      run: |
+        pip3 install requests
+    - name: 执行程序
+      run: |
+        python3 ./src/sendConfig.py
+      env: 
+          config: ${{ secrets.CONFIG }}
