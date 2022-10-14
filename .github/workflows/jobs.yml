@@ -4,13 +4,11 @@ on:
   schedule:
     # * is a special character in YAML so you have to quote this string
     - cron:  '0 22 * * *' # 6:00,18:00 （GMT+8）
-  watch:
-    types: started
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    if: github.event.repository.owner.id == github.event.sender.id
     steps:
     - uses: actions/checkout@v2
     - name: 初始化Python
