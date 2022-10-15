@@ -90,6 +90,8 @@ Gen epub and mobi Books from RSS with github action
 
    ref crontab
 
+   if you want to get Rss before N hours, you can write the hours num to /conf/time.txt, the num must less than 10000
+
 5. enable github action, and do a test by clicking star
 
    ## Example for Css

@@ -53,10 +53,14 @@ def get_start(fname):
     '''
     with open("./config/time.txt","r+") as f:
         timeStamp = int(f.read())
-        #获取完start立即写入，确保时间间隔为最小
-        f.seek(0)
-        f.write(str(int(time.mktime(datetime.now(pytz.timezone('UTC')).timetuple()))))
+        #write new time stamp after read it
+        if(timeStamp<10000):#if time stamp is a num which is less than 100, it means that we should calculate the stamp before N hours
+            timeStamp = int(time.mktime(datetime.now(pytz.timezone('UTC')).timetuple())) - (timeStamp * 3600)
+        else: # calculate time stamp do not need to write new time stamp to the file
+            f.seek(0)
+            f.write(str(int(time.mktime(datetime.now(pytz.timezone('UTC')).timetuple()))))
         f.close()
+
     '''
     #获取完start立即写入，确保时间间隔为最小
     logging.info("save this stamp to file.")

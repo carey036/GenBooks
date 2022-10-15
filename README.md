@@ -89,6 +89,8 @@ Gen epub and mobi Books from RSS with github action
 
    参考crontab
 
+   如果你想抓取N个小时前的rss，可以在/conf/time.txt中写入一个小于10000的数字。
+
 5. 打开github action，点击star进行测试
 
    ## CSS示例
