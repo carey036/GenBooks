@@ -14,7 +14,7 @@ jobs:
     - name: 初始化Python
       uses: actions/setup-python@v2
       with:
-        python-version: 3.9.1
+        python-version: 3.10.x
     - name: 配置环境
       run: |
         sudo apt install libegl1 libopengl0
