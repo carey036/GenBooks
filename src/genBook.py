@@ -3,15 +3,13 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
 from datetime import datetime, timedelta
-import os,smtplib,sys,pytz,time,logging,threading,subprocess,json,requests,shutil,_thread,processRss
+import os,smtplib,sys,pytz,time,logging,threading,subprocess,json,requests,shutil,processRss
 from boox import send2Boox
 logging.basicConfig(level=logging.INFO)
 def getConfig():
     ### 仅调试时使用
     with open("./config/rss.conf","r",encoding="utf8") as f:
-        conf = f.read()
-        f.close()
-    return conf
+        return f.read()
 config = os.environ.get("config")
 #config = getConfig()
 logging.info("loading config")
@@ -21,8 +19,8 @@ try:
     else:
         logging.info("get env fail, try to read rss.conf")
         config = json.loads(getConfig())
-except:
-    logging.info("error occurred when reading config")
+except Exception as e:
+    logging.info(f"error occurred when reading config: {e}")
 feeds = config["feeds"]
 booktitle = config["title"]
 emailInfo = config["emailinfo"]
@@ -75,20 +73,13 @@ def get_start(fname):
 
 def convert_to_mobi(input_file, output_file):
     cmd = ['ebook-convert', input_file, output_file]
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE)
-    out = process.communicate()
-    #print ("Result : "+out.decode() )
-    #print(str(out))
-    if(".mobi" in str(out)):
-        logging.info("mobi created success")
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    out, err = process.communicate()
+    if process.returncode == 0:
+        logging.info(f"converted {input_file} -> {output_file} success")
     else:
-        logging.info("mobi created fail")
-        logging.info(out)
-    if(".epub" in str(out)):
-        logging.info("epub created success")
-    else:
-        logging.info("epub created fail")
-        logging.info(out)
+        logging.info(f"convert {input_file} -> {output_file} failed")
+        logging.info(err.decode(errors='replace'))
 def sendEmail(send_from, send_to, subject, text, files):
     # assert isinstance(send_to, list)
 
@@ -107,7 +98,6 @@ def sendEmail(send_from, send_to, subject, text, files):
                 Content_Disposition=f'attachment; filename="{os.path.basename(f)}"',
                 Name=os.path.basename(f)
             ))
-            fil.close()
     try:
         smtp = smtplib.SMTP_SSL(emailInfo["smtp"],emailInfo["port"])
     except:
@@ -165,7 +155,7 @@ def do_one_round():
             else:
                 logging.info("Email is disabled, skip")
         except Exception as e:
-            logging.info("error when sending email: " + e )
+            logging.info(f"error when sending email: {e}")
         ##读取文件，防止删除时正在使用
         epubRB = open(epubFile,"rb")
         mobiRB = open(mobiFile,"rb")
@@ -184,7 +174,7 @@ def do_one_round():
             else:
                 logging.info("webdav is disabled, skip")
         except Exception as e:
-            logging.info("error when upload to webdav: " + e )
+            logging.info(f"error when upload to webdav: {e}")
         ##执行telegram发送动作
         logging.info("upload file to telegram")
         try:
@@ -194,7 +184,7 @@ def do_one_round():
                 if(config["telegram"]["mobi"]):
                     requests.post(f'https://api.telegram.org/bot{config["telegram"]["token"]}/sendDocument?chat_id={config["telegram"]["chat_id"]}', files = {"Document".lower(): mobiRB})
         except Exception as e:
-            logging.info("error when send to telegram: " + e )
+            logging.info(f"error when send to telegram: {e}")
         ##close rb open
         epubRB.close()
         mobiRB.close()
@@ -211,7 +201,7 @@ def do_one_round():
                         print(send2Boox(boox['token'],mobiFile.encode("utf-8").decode("latin1"),f).putFile())
                         f.close()
         except Exception as e:
-            logging.info("error when send to boox: " + e )
+            logging.info(f"error when send to boox: {e}")
         ##执行github动作
         ##因为github会删除文档，所以要最后执行
         logging.info("upload file to github repo")

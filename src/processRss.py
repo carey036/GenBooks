@@ -22,17 +22,10 @@ class processRss:
         thispost['nicetime'] = self.nicehour(thispost['time'])
         return thispost
     def get_posts_list(self,feed, START):
-        """
-        Spawn a worker thread for each feed.
-        """
         posts = []
-        ths = []
         th = FeedparserThread(feed, START, posts)
-        ths.append(th)
         th.start()
-        for th in ths:
-            th.join()
-        # When all is said and done,
+        th.join()
         return posts
     def downloadimg(self,url,imgid,thisformat,compress_quality):
         headers = {
@@ -43,9 +36,8 @@ class processRss:
         with open(f"./temp/OEBPS/img{self.imgid}.{thisformat}","wb")as f:
             try:
                 f.write(requests.get(url,headers=headers).content)
-            except:
-                logging.info(f"{self.imgid}.{thisformat}下载失败")
-            f.close()
+            except Exception as e:
+                logging.info(f"img{self.imgid}.{thisformat}下载失败: {e}")
         #print("download")
         try:
             self.compress_img(f"./temp/OEBPS/img{imgid}.{thisformat}",compress_quality)
@@ -73,12 +65,11 @@ class processRss:
             #print(img['src'])
             imgformats = ["jpg","png"]
             thisformat = False
-            for imgformat in imgformats:
-                try:
-                    if(imgformat in img['src']):
-                        thisformat = imgformat
-                except:#if not src attr
-                    thisformat = False
+            src = img.get('src', '')
+            if src:
+                ext = src.split('?')[0].rsplit('.', 1)[-1].lower()
+                if ext in imgformats:
+                    thisformat = ext
             #print(thisformat)
             if(thisformat):
                 #_thread.start_new_thread(downloadimg,(img['src'],imgid,thisformat,))
@@ -94,10 +85,7 @@ class processRss:
     def genjson(self,feeds):
         for feed in feeds:
             posts = self.get_posts_list(feed["url"],self.start)
-            try:
-                thisfeed = {"name":feed["name"],"posts":[],"css":feed["css"]}
-            except:
-                thisfeed = {"name":feed["name"],"posts":[],"css":""}
+            thisfeed = {"name":feed["name"],"posts":[],"css":feed.get("css","")}
             if(posts):
                 logging.info(f"Downloaded {len(posts)} posts")
                 self.updatenum += len(posts)
@@ -174,21 +162,16 @@ class processRss:
         # epubinfo = {"opf":"","ncx":"","toc_summary":"","feeds":[],"tocs":[]}
         with open(temppath+"OEBPS/content.opf","w",encoding='utf-8') as f:
             f.write(epubinfo["opf"])
-            f.close()
         with open(temppath+"OEBPS/toc.ncx","w",encoding='utf-8') as f:
             f.write(epubinfo["ncx"])
-            f.close()
         with open(temppath+"OEBPS/toc.html","w",encoding='utf-8') as f:
             f.write(epubinfo["toc_summary"])
-            f.close()
         for feed in epubinfo['feeds']:
             with open(temppath+"OEBPS/feed{}.html".format(feed["feedid"]),"w",encoding='utf-8') as f:
                 f.write(feed['content'])
-                f.close()
         for toc in epubinfo['tocs']:
             with open(temppath+"OEBPS/toc_{}.html".format(toc["feedid"]),"w",encoding='utf-8') as f:
                 f.write(toc['content'])
-                f.close()
         #压缩保存
         z = zipfile.ZipFile(savepath,'w',zipfile.ZIP_DEFLATED)
         for dirpath, dirnames, filenames in os.walk(temppath):

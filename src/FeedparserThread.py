@@ -1,5 +1,6 @@
 import pytz
 import time
+import calendar
 from datetime import datetime, timedelta
 import collections
 import threading
@@ -64,7 +65,7 @@ def process_entry(entry, blog, START):
             return  # Ignore undateable posts
 
     if when:
-        when = pytz.timezone('UTC').localize(datetime.fromtimestamp(time.mktime(when)))
+        when = pytz.timezone('UTC').localize(datetime.fromtimestamp(calendar.timegm(when)))
     else:
         # print blog, entry
         return
