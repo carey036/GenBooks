@@ -122,6 +122,7 @@ def test_builder() -> None:
         posts = [
             Post(datetime(2026, 10, 21, 7, 0, tzinfo=timezone.utc), "源A", "标题一", "作者", "http://x/1", "<p>正文</p>"),
             Post(datetime(2026, 10, 21, 6, 0, tzinfo=timezone.utc), "源A", "标题<2>", "作者", "http://x/2", "<p>含&lt;尖括号&gt;</p>"),
+            Post(datetime(2026, 10, 21, 5, 0, tzinfo=timezone.utc), "源A", "标题三", "作者", "http://x/3", "<p>正文三</p>"),
         ]
         chapters = [Chapter(title="源A", posts=posts)]
         out = build_epub("测试书", chapters, Path(td) / "t.epub")
@@ -134,6 +135,37 @@ def test_builder() -> None:
         check("含 EPUB3 nav.xhtml", any(n.endswith("nav.xhtml") for n in z.namelist()))
         opf = [n for n in z.namelist() if n.endswith(".opf")]
         check("含 content.opf", len(opf) == 1)
+
+        # 每篇文章必须是独立文件（不能全挤在一个 chapter 里）
+        import re as _re
+
+        article_files = [
+            n for n in z.namelist() if _re.search(r"_a\d+\.xhtml$", n)
+        ]
+        check("每篇文章独立成文件", len(article_files) == 3, f"实际 {len(article_files)} 个: {article_files}")
+
+        for name in article_files:
+            html = z.read(name).decode()
+            n_title = html.count('class="article-title"')
+            check(f"{name} 只含 1 篇", n_title == 1, f"含 {n_title} 篇")
+
+        # 目录必须是两层：源分组下面挂文章
+        nav = z.read([n for n in z.namelist() if n.endswith("nav.xhtml")][0]).decode()
+        check("nav 含源分组标题", "源A" in nav)
+        check("nav 含每篇文章标题", all(t in nav for t in ("标题一", "标题&lt;2&gt;", "标题三")))
+        check("nav 是嵌套结构(<ol> 出现两次)", nav.count("<ol") >= 2, f"<ol 出现 {nav.count('<ol')} 次")
+
+
+def test_single_article_no_group() -> None:
+    """一个源只有一篇文章时，不应再套一层分组。"""
+    print("\n[构建层-单篇不分组]")
+    with tempfile.TemporaryDirectory() as td:
+        posts = [Post(datetime(2026, 10, 21, 7, 0, tzinfo=timezone.utc), "源B", "唯一一篇", "a", "l", "<p>x</p>")]
+        out = build_epub("书", [Chapter(title="源B", posts=posts)], Path(td) / "s.epub")
+        z = zipfile.ZipFile(out)
+        nav = z.read([n for n in z.namelist() if n.endswith("nav.xhtml")][0]).decode()
+        check("单篇时文章直接挂在目录下", "唯一一篇" in nav)
+        check("单篇时不额外生成分组页", not any(n.endswith("g0.xhtml") for n in z.namelist()))
 
 
 # ------------------------------------------------------------------ 投递层
@@ -193,7 +225,7 @@ def main() -> int:
     print("=" * 60)
     print("GenBooks 冒烟测试")
     print("=" * 60)
-    for fn in (test_config, test_time, test_builder, test_delivery):
+    for fn in (test_config, test_time, test_builder, test_single_article_no_group, test_delivery):
         try:
             fn()
         except Exception as e:  # noqa: BLE001

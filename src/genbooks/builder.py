@@ -5,6 +5,18 @@ keys.py 里那一堆），改用 ebooklib 生成标准 EPUB3。这样：
   * mimetype 由库保证「第一个 entry 且不压缩」，符合 OCF 规范
   * nav.xhtml（EPUB3 目录）和 toc.ncx（兼容旧设备）都自动生成
   * 不用再维护几百行容易漏字段的模板字符串
+
+目录结构（两层）：
+
+    ├── 书伴 (7)                      ← 源分组
+    │   ├── 亚马逊 Kindle Unlimited 正式更名…
+    │   ├── 国产墨水屏难赚钱…
+    │   └── …
+    ├── 少数派 (3)
+    │   └── …
+
+每篇文章是独立的 xhtml 文件，可以在阅读器里单独跳转、单独定位。
+一个源只有一篇文章时不再额外套一层分组，直接平铺。
 """
 
 from __future__ import annotations
@@ -12,7 +24,6 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 
 from ebooklib import epub
@@ -26,16 +37,17 @@ log = logging.getLogger(__name__)
 # 正文基础样式，各 feed 的 css 会追加在后面
 BASE_CSS = """
 body { font-family: serif; line-height: 1.6; }
-h2.feedtitle { font-size: 1.3em; font-weight: bold; margin-top: 1.2em; }
-.article-meta { font-size: 0.8em; color: #666; }
+h2.article-title { font-size: 1.4em; font-weight: bold; margin-bottom: 0.3em; }
+h2.group-title { font-size: 1.6em; font-weight: bold; border-bottom: 2px solid #333;
+                 padding-bottom: 0.3em; margin-bottom: 1em; }
+.article-meta { font-size: 0.8em; color: #666; margin-bottom: 1em; }
 img { max-width: 100%; height: auto; }
-.chapter-title { font-size: 1.5em; font-weight: bold; }
 """
 
 
 @dataclass
 class Chapter:
-    """一个 RSS 源对应书里的一章。"""
+    """一个 RSS 源的一组文章。"""
 
     title: str
     posts: list[Post] = field(default_factory=list)
@@ -52,6 +64,36 @@ def _esc(text: str) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
+
+
+def _xhtml(title: str, body: str, extra_css: str = "") -> str:
+    """包一层完整的 XHTML 外壳。
+
+    注意：这里**不能**带 ``<?xml version="1.0" encoding="utf-8"?>`` 声明。
+    ebooklib 内部用 lxml 的 HTML 解析器处理 content 字符串，遇到带
+    encoding 声明的 unicode 字符串会直接抛 ValueError，导致该章节
+    （以及连带依赖它的 nav.xhtml）静默丢失。
+    """
+    css_tag = f'<style type="text/css">{extra_css}</style>' if extra_css else ""
+    return (
+        '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">'
+        f"<head><title>{_esc(title)}</title>"
+        '<link rel="stylesheet" href="style.css" type="text/css"/>'
+        f"{css_tag}</head><body>{body}</body></html>"
+    )
+
+
+def _article_body(
+    post: Post, chapter: Chapter, downloader: ImageDownloader
+) -> tuple[str, list]:
+    """处理一篇正文：图片下载/剥离，返回 (html, 图片资源列表)。"""
+    body = post.body or ""
+    assets = []
+    if chapter.saveimg:
+        body, assets = rewrite_body(body, downloader)
+    else:
+        body = strip_images(body)
+    return body, assets
 
 
 def build_epub(
@@ -78,59 +120,6 @@ def build_epub(
             log.warning("找不到封面文件 %s，将不带封面生成", cover)
 
     style = BASE_CSS + "\n" + css
-    chapter_items: list[epub.EpubHtml] = []
-    image_count = 0
-
-    for idx, chapter in enumerate(chapters):
-        downloader = ImageDownloader(chapter.imgquality)
-        # 图片要先作为独立 item 加入书里，正文才能引用
-        html_parts: list[str] = []
-        for post in chapter.posts:
-            body = post.body or ""
-            if chapter.saveimg:
-                body, assets = rewrite_body(body, downloader)
-                for asset in assets:
-                    item = epub.EpubItem(
-                        uid=f"ch{idx}_{asset.name}",
-                        file_name=f"images/{asset.name}",
-                        media_type=asset.media_type,
-                        content=asset.data,
-                    )
-                    book.add_item(item)
-                    image_count += 1
-                # 正文里引用的路径要和 item 的 file_name 一致
-                for asset in assets:
-                    body = body.replace(f'src="{asset.name}"', f'src="images/{asset.name}"')
-            else:
-                body = strip_images(body)
-
-            when = post.time.astimezone().strftime("%Y-%m-%d %H:%M")
-            html_parts.append(
-                f'<div class="article">'
-                f'<h3 class="article-title">{_esc(post.title)}</h3>'
-                f'<p class="article-meta">{_esc(post.author)} · {_esc(post.blog)} · {when}</p>'
-                f'<div class="article-body">{body}</div>'
-                f"</div>"
-            )
-
-        item = epub.EpubHtml(
-            title=chapter.title,
-            file_name=f"chapter_{idx}.xhtml",
-            lang="zh",
-        )
-        item.content = (
-            '<html xmlns="http://www.w3.org/1999/xhtml"><head>'
-            f'<title>{_esc(chapter.title)}</title>'
-            f'<link rel="stylesheet" href="style.css" type="text/css"/>'
-            "</head><body>"
-            f'<h2 class="chapter-title">{_esc(chapter.title)}</h2>'
-            + (f'<style type="text/css">{chapter.css}</style>' if chapter.css else "")
-            + "\n".join(html_parts)
-            + "</body></html>"
-        )
-        book.add_item(item)
-        chapter_items.append(item)
-
     style_item = epub.EpubItem(
         uid="style",
         file_name="style.css",
@@ -139,14 +128,90 @@ def build_epub(
     )
     book.add_item(style_item)
 
-    book.toc = tuple(chapter_items)
+    spine: list = []
+    toc: list = []
+    article_count = 0
+    image_count = 0
+
+    for group_idx, chapter in enumerate(chapters):
+        downloader = ImageDownloader(chapter.imgquality)
+        article_items: list[epub.EpubHtml] = []
+
+        for art_idx, post in enumerate(chapter.posts):
+            body, assets = _article_body(post, chapter, downloader)
+
+            # 图片作为独立 item 加入，并把正文里的相对路径改成 images/ 前缀
+            for asset in assets:
+                item = epub.EpubItem(
+                    uid=f"g{group_idx}a{art_idx}_{asset.name}",
+                    file_name=f"images/{asset.name}",
+                    media_type=asset.media_type,
+                    content=asset.data,
+                )
+                book.add_item(item)
+                image_count += 1
+                body = body.replace(f'src="{asset.name}"', f'src="images/{asset.name}"')
+
+            when = post.time.astimezone().strftime("%Y-%m-%d %H:%M")
+            # 标题已在 h2 里，不再重复显示；来源与时间放小字
+            meta_bits = [b for b in (post.blog, when) if b]
+            html = _xhtml(
+                post.title,
+                f'<h2 class="article-title">{_esc(post.title)}</h2>'
+                f'<p class="article-meta">{_esc(" · ".join(meta_bits))}</p>'
+                f'<div class="article-body">{body}</div>',
+                chapter.css,
+            )
+
+            item = epub.EpubHtml(
+                title=post.title,
+                file_name=f"g{group_idx}_a{art_idx}.xhtml",
+                lang="zh",
+            )
+            item.content = html
+            book.add_item(item)
+            article_items.append(item)
+            article_count += 1
+
+        if not article_items:
+            continue
+
+        spine.extend(article_items)
+
+        # 目录：多篇文章时套一层源分组；只有一篇就直接平铺
+        if len(article_items) == 1:
+            toc.append(article_items[0])
+        else:
+            section = epub.Section(chapter.title, href=f"g{group_idx}.xhtml")
+            # 分组本身需要一个落脚页，否则部分阅读器点击分组无反应
+            group_head = epub.EpubHtml(
+                title=chapter.title,
+                file_name=f"g{group_idx}.xhtml",
+                lang="zh",
+            )
+            group_head.content = _xhtml(
+                chapter.title,
+                f'<h2 class="group-title">{_esc(chapter.title)}</h2>'
+                f'<p class="article-meta">共 {len(article_items)} 篇</p>',
+            )
+            book.add_item(group_head)
+            spine.insert(len(spine) - len(article_items), group_head)
+            toc.append((section, tuple(article_items)))
+
+    book.toc = tuple(toc)
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
-    book.spine = ["nav", *chapter_items]
+    book.spine = ["nav", *spine]
 
     output.parent.mkdir(parents=True, exist_ok=True)
     epub.write_epub(str(output), book)
-    log.info("epub 已生成：%s（%d 章，%d 张图片）", output, len(chapters), image_count)
+    log.info(
+        "epub 已生成：%s（%d 个源 / %d 篇文章，%d 张图片）",
+        output,
+        len(chapters),
+        article_count,
+        image_count,
+    )
     return output
 
 
