@@ -36,6 +36,7 @@ class Post:
     author: str
     link: str
     body: str
+    site: str = ""
 
 
 def _entry_time(entry) -> datetime | None:
@@ -67,13 +68,21 @@ def _entry_body(entry) -> str:
     return entry.get("summary", "")
 
 
-def to_post(entry, blog: str, since: datetime) -> Post | None:
-    """把 feedparser 的 entry 转成 Post；早于 since 或无法定日期的返回 None。"""
+def to_post(entry, blog: str, since: datetime, site: str = "") -> Post | None:
+    """把 feedparser 的 entry 转成 Post。
+
+    ``site`` 是文章所属站点的根地址，主要用于图片请求的 Referer。
+
+    关于无日期条目：很多源（典型如知乎日报）只有第一条带 pubDate，其余
+    条目完全没有时间字段。旧实现遇到这种情况直接丢弃，导致 30 篇只抓到
+    1 篇。这里改为**用当前时间兜底**——没有时间信息说明我们无法判断它
+    是不是旧的，宁可多收一篇也不要静默漏掉。
+    """
     when = _entry_time(entry)
     if when is None:
-        log.debug("跳过无法确定时间的条目：%s", entry.get("title"))
-        return None
-    if when < since:
+        log.debug("条目没有时间字段，按当前时间处理：%s", entry.get("title"))
+        when = datetime.now(timezone.utc)
+    elif when < since:
         return None
     return Post(
         time=when,
@@ -82,6 +91,7 @@ def to_post(entry, blog: str, since: datetime) -> Post | None:
         author=_entry_author(entry),
         link=entry.get("link", ""),
         body=_entry_body(entry),
+        site=site,
     )
 
 
@@ -117,11 +127,12 @@ def fetch_feed(feed: FeedConfig, since: datetime, timeout: int = DEFAULT_TIMEOUT
         log.warning("[%s] 解析异常且无条目：%s", feed.name, getattr(parsed, "bozo_exception", ""))
 
     blog = feed.name or parsed.get("feed", {}).get("title", "") or feed.url
+    site = _site_of(feed.url, parsed)
 
     posts: list[Post] = []
     for entry in parsed.get("entries", []):
         try:
-            post = to_post(entry, blog, since)
+            post = to_post(entry, blog, since, site)
         except Exception as e:  # noqa: BLE001
             log.warning("[%s] 条目解析失败，已跳过：%s", feed.name, e)
             continue
@@ -131,6 +142,26 @@ def fetch_feed(feed: FeedConfig, since: datetime, timeout: int = DEFAULT_TIMEOUT
     posts.sort(key=lambda p: p.time)
     log.info("[%s] 抓到 %d 篇", feed.name, len(posts))
     return posts
+
+
+def _site_of(feed_url: str, parsed) -> str:
+    """推断文章所属站点，用于图片请求的 Referer。
+
+    优先级：feed 里声明的站点主页 > feed 自身域名。知乎图床这类服务会
+    校验 Referer，不带会直接 403。
+    """
+    link = ""
+    try:
+        link = (parsed.get("feed") or {}).get("link") or ""
+    except Exception:  # noqa: BLE001
+        link = ""
+    base = link or feed_url
+    from urllib.parse import urlparse
+
+    parsed_url = urlparse(base)
+    if parsed_url.scheme and parsed_url.netloc:
+        return f"{parsed_url.scheme}://{parsed_url.netloc}/"
+    return ""
 
 
 def fetch_all(

@@ -44,12 +44,22 @@ class ImageAsset:
 
 
 class ImageDownloader:
-    def __init__(self, quality: int = 100, grayscale: bool = True):
+    def __init__(
+        self,
+        quality: int = 100,
+        grayscale: bool = True,
+        referer: str = "",
+    ):
         self.quality = max(1, min(100, quality))
         self.grayscale = grayscale
+        self.referer = referer
         self.session = requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
+        self.session.headers["Accept"] = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
+        if referer:
+            self.session.headers["Referer"] = referer
         self._counter = 0
+        self.failed = 0
 
     def _next_name(self, fmt: str) -> str:
         name = f"img{self._counter}.{_EXT[fmt]}"
@@ -92,21 +102,44 @@ class ImageDownloader:
         if not url.startswith(("http://", "https://")):
             log.debug("跳过非 http 图片：%s", url)
             return None
-        try:
-            resp = self.session.get(url, timeout=DOWNLOAD_TIMEOUT, stream=True)
-            resp.raise_for_status()
-            raw = b""
-            for chunk in resp.iter_content(64 * 1024):
-                raw += chunk
-                if len(raw) > MAX_IMAGE_BYTES:
-                    log.warning("图片过大，跳过：%s", url)
-                    return None
-        except requests.RequestException as e:
-            log.warning("图片下载失败 %s：%s", url, e)
+
+        # 第一轮：正常请求。第二轮：很多图床（知乎/微信等）校验 Referer，
+        # 没带或带错会返回 403，这里用图片自身的域名做 Referer 重试一次。
+        attempts = [None]
+        if not self.referer:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(url)
+            attempts.append(f"{parsed.scheme}://{parsed.netloc}/")
+
+        last_error = ""
+        for referer in attempts:
+            headers = {"Referer": referer} if referer else {}
+            try:
+                resp = self.session.get(
+                    url, timeout=DOWNLOAD_TIMEOUT, stream=True, headers=headers
+                )
+                resp.raise_for_status()
+                raw = b""
+                for chunk in resp.iter_content(64 * 1024):
+                    raw += chunk
+                    if len(raw) > MAX_IMAGE_BYTES:
+                        log.warning("图片过大，跳过：%s", url)
+                        return None
+                break
+            except requests.RequestException as e:
+                last_error = str(e)
+                raw = b""
+                continue
+
+        if not raw:
+            self.failed += 1
+            log.warning("图片下载失败 %s：%s", url, last_error)
             return None
 
         processed = self._compress(raw)
         if processed is None:
+            self.failed += 1
             log.warning("不是可识别的图片，跳过：%s", url)
             return None
 

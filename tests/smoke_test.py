@@ -109,8 +109,16 @@ def test_time() -> None:
         f"旧实现会得到 {old_val}",
     )
 
-    # 无日期的条目跳过
-    check("无日期条目返回 None", F.to_post(E(title="x"), "b", expect) is None)
+    # 无日期的条目不再丢弃（知乎日报等源 30 条里只有 1 条带日期，
+    # 旧实现会把另外 29 条全丢掉），改为用当前时间兜底
+    no_date_post = F.to_post(E(title="x", link="http://x"), "b", expect)
+    check("无日期条目不再被丢弃", no_date_post is not None)
+    if no_date_post is not None:
+        check(
+            "无日期条目用当前时间兜底",
+            no_date_post.time >= expect,
+            f"got={no_date_post.time}",
+        )
 
 
 # ------------------------------------------------------------------ 构建层

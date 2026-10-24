@@ -54,6 +54,7 @@ class Chapter:
     css: str = ""
     saveimg: bool = False
     imgquality: int = 100
+    site: str = ""
 
 
 def _esc(text: str) -> str:
@@ -134,7 +135,7 @@ def build_epub(
     image_count = 0
 
     for group_idx, chapter in enumerate(chapters):
-        downloader = ImageDownloader(chapter.imgquality)
+        downloader = ImageDownloader(chapter.imgquality, referer=chapter.site)
         article_items: list[epub.EpubHtml] = []
 
         for art_idx, post in enumerate(chapter.posts):
@@ -230,6 +231,7 @@ def group_into_chapters(
                 css=feed.css,
                 saveimg=feed.saveimg,
                 imgquality=feed.imgquality,
+                site=posts[0].site if posts else "",
             )
         )
     return chapters
