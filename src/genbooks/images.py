@@ -49,6 +49,7 @@ class ImageDownloader:
         quality: int = 100,
         grayscale: bool = True,
         referer: str = "",
+        name_prefix: str = "",
     ):
         self.quality = max(1, min(100, quality))
         self.grayscale = grayscale
@@ -58,11 +59,15 @@ class ImageDownloader:
         self.session.headers["Accept"] = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
         if referer:
             self.session.headers["Referer"] = referer
+        # 每张图必须全局唯一。多源合并时每个源会各自 new 一个 downloader，
+        # 若计数器都从 0 开始，不同源的图片会同名互相覆盖（zip 里出现
+        # Duplicate name，最终显示的图张冠李戴）。
+        self._prefix = name_prefix
         self._counter = 0
         self.failed = 0
 
     def _next_name(self, fmt: str) -> str:
-        name = f"img{self._counter}.{_EXT[fmt]}"
+        name = f"{self._prefix}img{self._counter}.{_EXT[fmt]}"
         self._counter += 1
         return name
 

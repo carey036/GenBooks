@@ -135,7 +135,11 @@ def build_epub(
     image_count = 0
 
     for group_idx, chapter in enumerate(chapters):
-        downloader = ImageDownloader(chapter.imgquality, referer=chapter.site)
+        downloader = ImageDownloader(
+            chapter.imgquality,
+            referer=chapter.site,
+            name_prefix=f"g{group_idx}_",
+        )
         article_items: list[epub.EpubHtml] = []
 
         for art_idx, post in enumerate(chapter.posts):
@@ -179,8 +183,11 @@ def build_epub(
 
         spine.extend(article_items)
 
-        # 目录：多篇文章时套一层源分组；只有一篇就直接平铺
-        if len(article_items) == 1:
+        # 目录：始终套一层源分组。多源合并成一本书时，如果某个源只有一
+        # 篇文章就平铺，它的文章会和别的源的分组并列，从目录上根本看不出
+        # 来自哪个源。只有全书真的只有一个源、且该源只有一篇时才省略分组。
+        only_one_source = len(chapters) == 1
+        if only_one_source and len(article_items) == 1:
             toc.append(article_items[0])
         else:
             section = epub.Section(chapter.title, href=f"g{group_idx}.xhtml")

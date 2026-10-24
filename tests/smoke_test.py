@@ -165,8 +165,8 @@ def test_builder() -> None:
 
 
 def test_single_article_no_group() -> None:
-    """一个源只有一篇文章时，不应再套一层分组。"""
-    print("\n[构建层-单篇不分组]")
+    """全书只有一个源且只有一篇时，省略分组层。"""
+    print("\n[构建层-单源单篇省略分组]")
     with tempfile.TemporaryDirectory() as td:
         posts = [Post(datetime(2026, 10, 21, 7, 0, tzinfo=timezone.utc), "源B", "唯一一篇", "a", "l", "<p>x</p>")]
         out = build_epub("书", [Chapter(title="源B", posts=posts)], Path(td) / "s.epub")
@@ -174,6 +174,51 @@ def test_single_article_no_group() -> None:
         nav = z.read([n for n in z.namelist() if n.endswith("nav.xhtml")][0]).decode()
         check("单篇时文章直接挂在目录下", "唯一一篇" in nav)
         check("单篇时不额外生成分组页", not any(n.endswith("g0.xhtml") for n in z.namelist()))
+
+
+def test_multi_source_all_grouped() -> None:
+    """多个源合并成一本书时，即使某源只有一篇，也要套分组标明来源。
+
+    否则那篇平铺的文章会和别的源的分组并列，目录上无法判断它属于哪个源。
+    """
+    print("\n[构建层-多源全部保留分组]")
+    with tempfile.TemporaryDirectory() as td:
+        p_many = [
+            Post(datetime(2026, 10, 21, 7, 0, tzinfo=timezone.utc), "源A", f"A{i}", "a", "l", "<p>x</p>")
+            for i in range(3)
+        ]
+        p_one = [Post(datetime(2026, 10, 21, 6, 0, tzinfo=timezone.utc), "源B", "B唯一", "a", "l", "<p>y</p>")]
+        out = build_epub(
+            "合并书",
+            [Chapter(title="源A", posts=p_many), Chapter(title="源B", posts=p_one)],
+            Path(td) / "m.epub",
+        )
+        z = zipfile.ZipFile(out)
+        nav = z.read([n for n in z.namelist() if n.endswith("nav.xhtml")][0]).decode()
+
+        check("源A 保留分组", "源A" in nav)
+        check("源B 即使只有一篇也保留分组", "源B" in nav)
+        check("两个源都在嵌套结构里(<ol)至少 3 层)", nav.count("<ol") >= 3, f'<ol 出现 {nav.count("<ol")} 次')
+        check("两篇分组页都生成", any("g0.xhtml" in n for n in z.namelist()) and any("g1.xhtml" in n for n in z.namelist()))
+
+
+def test_image_names_unique() -> None:
+    """多源合并时图片文件名必须全局唯一。
+
+    每个源会 new 一个自己的 ImageDownloader，若计数器都从 0 开始，
+    不同源的 img0.jpg 会互相覆盖（zip 出现 Duplicate name），
+    最终正文里显示的是别的源/别的文章的图。
+    """
+    print("\n[构建层-图片文件名唯一]")
+    from genbooks.images import ImageDownloader
+
+    d0 = ImageDownloader(quality=50, name_prefix="g0_")
+    d1 = ImageDownloader(quality=50, name_prefix="g1_")
+    n0 = [d0._next_name("jpeg") for _ in range(3)]
+    n1 = [d1._next_name("jpeg") for _ in range(3)]
+    check("不同源图片名不冲突", not (set(n0) & set(n1)), f"{n0} vs {n1}")
+    check("同源内自增不重复", len(set(n0)) == 3, str(n0))
+    check("无前缀时行为不变", ImageDownloader()._next_name("png") == "img0.png")
 
 
 # ------------------------------------------------------------------ 投递层
@@ -233,7 +278,7 @@ def main() -> int:
     print("=" * 60)
     print("GenBooks 冒烟测试")
     print("=" * 60)
-    for fn in (test_config, test_time, test_builder, test_single_article_no_group, test_delivery):
+    for fn in (test_config, test_time, test_builder, test_single_article_no_group, test_multi_source_all_grouped, test_image_names_unique, test_delivery):
         try:
             fn()
         except Exception as e:  # noqa: BLE001
