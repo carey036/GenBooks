@@ -13,6 +13,10 @@ from __future__ import annotations
 
 import io
 import logging
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass
 
 import requests
@@ -30,8 +34,11 @@ USER_AGENT = (
 _MEDIA_TYPES = {"jpeg": "image/jpeg", "png": "image/png", "gif": "image/gif"}
 _EXT = {"jpeg": "jpg", "png": "png", "gif": "gif"}
 
-DOWNLOAD_TIMEOUT = 20
+CONNECT_TIMEOUT = 10                 # 连接超时（秒）
+DOWNLOAD_TIMEOUT = 20               # 单张图读取超时（秒）
 MAX_IMAGE_BYTES = 15 * 1024 * 1024  # 单张图上限，防止把书撑爆
+IMAGE_WORKERS = 8                   # 并发下载线程数
+BATCH_TIMEOUT = 180                 # 一篇文章所有图片的总下载上限（秒）
 
 
 @dataclass
@@ -54,22 +61,27 @@ class ImageDownloader:
         self.quality = max(1, min(100, quality))
         self.grayscale = grayscale
         self.referer = referer
-        self.session = requests.Session()
-        self.session.headers["User-Agent"] = USER_AGENT
-        self.session.headers["Accept"] = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
+        # 只保存请求头，不建共享 Session（见 fetch() 里的说明）
+        self.base_headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        }
         if referer:
-            self.session.headers["Referer"] = referer
+            self.base_headers["Referer"] = referer
         # 每张图必须全局唯一。多源合并时每个源会各自 new 一个 downloader，
         # 若计数器都从 0 开始，不同源的图片会同名互相覆盖（zip 里出现
         # Duplicate name，最终显示的图张冠李戴）。
         self._prefix = name_prefix
         self._counter = 0
+        self._lock = threading.Lock()
         self.failed = 0
 
     def _next_name(self, fmt: str) -> str:
-        name = f"{self._prefix}img{self._counter}.{_EXT[fmt]}"
-        self._counter += 1
-        return name
+        # 并发下载时多线程会同时取号，必须加锁，否则两张图会拿到同一个名字
+        with self._lock:
+            name = f"{self._prefix}img{self._counter}.{_EXT[fmt]}"
+            self._counter += 1
+            return name
 
     def _compress(self, raw: bytes) -> tuple[str, bytes] | None:
         """把任意图片转成 epub 友好的格式并压缩。不是图片则返回 None。"""
@@ -119,18 +131,27 @@ class ImageDownloader:
 
         last_error = ""
         for referer in attempts:
-            headers = {"Referer": referer} if referer else {}
+            headers = dict(self.base_headers)
+            if referer:
+                headers["Referer"] = referer
             try:
-                resp = self.session.get(
-                    url, timeout=DOWNLOAD_TIMEOUT, stream=True, headers=headers
+                # 每次请求用独立的 session / 连接。
+                #
+                # 不能共用 self.session：requests.Session 内部的连接池不是
+                # 为多线程并发设计的，8 个线程同时抢同一个池时会互相阻塞，
+                # 实测表现为「所有线程 sleep、既无网络 I/O 也无 CPU 占用」
+                # 的假死，任务永远不结束。图片数量有限，放弃连接复用的代价
+                # 远小于卡死。
+                resp = requests.get(
+                    url,
+                    timeout=(CONNECT_TIMEOUT, DOWNLOAD_TIMEOUT),
+                    headers=headers,
                 )
                 resp.raise_for_status()
-                raw = b""
-                for chunk in resp.iter_content(64 * 1024):
-                    raw += chunk
-                    if len(raw) > MAX_IMAGE_BYTES:
-                        log.warning("图片过大，跳过：%s", url)
-                        return None
+                raw = resp.content
+                if len(raw) > MAX_IMAGE_BYTES:
+                    log.warning("图片过大，跳过：%s", url)
+                    return None
                 break
             except requests.RequestException as e:
                 last_error = str(e)
@@ -152,23 +173,79 @@ class ImageDownloader:
         return ImageAsset(self._next_name(fmt), _MEDIA_TYPES[fmt], data)
 
 
+def collect_image_urls(html: str, max_images: int = 0) -> list[str]:
+    """从正文里取出需要下载的图片 URL（受 max_images 限制）。"""
+    soup = BeautifulSoup(html, "html.parser")
+    imgs = soup.find_all("img")
+    if max_images > 0:
+        imgs = imgs[:max_images]
+    out: list[str] = []
+    for img in imgs:
+        src = img.get("src") or img.get("data-src") or ""
+        if src:
+            out.append(src)
+    return out
+
+
 def rewrite_body(
-    html: str, downloader: ImageDownloader
+    html: str,
+    downloader: ImageDownloader,
+    pool: "ThreadPoolExecutor | None" = None,
+    max_images: int = 0,
+    prefetched: "dict[str, ImageAsset | None] | None" = None,
 ) -> tuple[str, list[ImageAsset]]:
     """处理一段正文 HTML 里的图片。
 
     返回 (新 HTML, 图片资源列表)。下载失败的 <img> 会被移除，避免 epub 里
     出现指向不存在文件的坏链接。
+
+    ``prefetched`` 是预先批量下载好的 ``{url: ImageAsset|None}``。整本书的
+    图片一次性并发下载，比「按文章分批等」快得多：后者每篇文章都要等自己
+    那批图跑完，线程池在批次边界会空转。``_next_name`` 有锁保护，并发安全。
     """
     soup = BeautifulSoup(html, "html.parser")
     assets: list[ImageAsset] = []
 
-    for img in soup.find_all("img"):
-        src = img.get("src") or img.get("data-src") or ""
+    imgs = list(soup.find_all("img"))
+    if not imgs:
+        return str(soup), assets
+
+    # 超过上限的图直接删掉，只留前面几张，避免一篇几十张图把整轮任务拖死
+    if max_images > 0 and len(imgs) > max_images:
+        for extra in imgs[max_images:]:
+            extra.decompose()
+        log.info("本篇图片 %d 张，超出上限，只保留前 %d 张", len(imgs), max_images)
+        imgs = imgs[:max_images]
+
+    srcs = [(img.get("src") or img.get("data-src") or "") for img in imgs]
+
+    if prefetched is not None:
+        results = prefetched
+    elif pool is not None:
+        # 同一 URL 只下载一次；结果按 URL 回填
+        unique = list(dict.fromkeys(s for s in srcs if s))
+        results: dict[str, ImageAsset | None] = {}
+        futures = {u: pool.submit(downloader.fetch, u) for u in unique}
+        deadline = time.monotonic() + BATCH_TIMEOUT
+        for url, fut in futures.items():
+            remaining = max(1.0, deadline - time.monotonic())
+            try:
+                results[url] = fut.result(timeout=remaining)
+            except FuturesTimeout:
+                # 兜底：单张图卡住不应该让整本书永远出不来
+                log.warning("图片下载超时，跳过：%s", url)
+                results[url] = None
+            except Exception as e:  # noqa: BLE001 - 单张图失败不影响整篇
+                log.warning("图片下载异常 %s：%s", url, e)
+                results[url] = None
+    else:
+        results = {}
+
+    for img, src in zip(imgs, srcs):
         if not src:
             img.decompose()
             continue
-        asset = downloader.fetch(src)
+        asset = results.get(src) if src in results else downloader.fetch(src)
         if asset is None:
             img.decompose()
             continue

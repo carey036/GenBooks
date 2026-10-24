@@ -18,7 +18,6 @@ import os
 import random
 from pathlib import Path
 
-import oss2
 import requests
 
 from .base import Channel
@@ -93,6 +92,15 @@ class BooxChannel(Channel):
         bucket_name = bucket_info.get("data", {}).get("bucket")
         if not bucket_name:
             raise RuntimeError(f"获取 boox bucket 失败：{bucket_info}")
+
+        # oss2 只在真正上传时才需要。放在顶层 import 会让没装 oss2 的用户
+        # 连整个程序都起不来（哪怕根本没启用 boox 渠道）。
+        try:
+            import oss2
+        except ImportError as e:  # pragma: no cover - 依赖缺失路径
+            raise RuntimeError(
+                "boox 渠道需要 oss2，请先 pip install oss2"
+            ) from e
 
         key = self._remote_key(path.name, uid)
         auth = oss2.StsAuth(

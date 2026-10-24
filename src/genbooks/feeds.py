@@ -23,7 +23,8 @@ from .config import FeedConfig
 
 log = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT = 30  # 秒
+DEFAULT_TIMEOUT = 30  # 读取超时（秒）
+CONNECT_TIMEOUT = 10  # 连接超时（秒）
 
 
 @dataclass
@@ -95,32 +96,49 @@ def to_post(entry, blog: str, since: datetime, site: str = "") -> Post | None:
     )
 
 
+def _download(url: str, timeout: int) -> bytes | None:
+    """用 requests 抓取 feed 原文。
+
+    不用 ``feedparser.parse(url)`` 直接抓：它底层的 urllib 超时只管单次
+    socket 操作，遇到连接被墙/DNS 卡住会反复重试，实测一个不可达的源能
+    卡住 130 秒以上，把整轮任务拖死。这里用 requests 自己控制总超时。
+    """
+    import requests
+
+    try:
+        resp = requests.get(
+            url,
+            # (连接超时, 读取超时) 分开设：连不上要快速失败，但 RSS 本身
+            # 可能几百 KB，读超时给足，否则正常源也会被误判失败。
+            timeout=(CONNECT_TIMEOUT, timeout),
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+                ),
+                "Accept": "application/rss+xml, application/xml, text/xml, */*;q=0.8",
+            },
+        )
+        resp.raise_for_status()
+        return resp.content
+    except Exception as e:  # noqa: BLE001 - 网络异常种类太多，统一兜底
+        log.warning("下载失败 %s：%s", url, e)
+        return None
+
+
 def fetch_feed(feed: FeedConfig, since: datetime, timeout: int = DEFAULT_TIMEOUT) -> list[Post]:
     """抓取单个 feed 并返回 since 之后的文章。
 
     任何网络/解析异常都在这里被吃掉并返回空列表 —— 一个源挂掉不应该影响别的源。
     """
+    raw = _download(feed.url, timeout)
+    if raw is None:
+        log.warning("[%s] 抓取失败，跳过该源", feed.name)
+        return []
     try:
-        parsed = feedparser.parse(
-            feed.url,
-            request_headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-                )
-            },
-            # feedparser 透传给 urllib 的超时
-            request_timeout=timeout,
-        )
-    except TypeError:
-        # 老版本 feedparser 不支持 request_timeout
-        try:
-            parsed = feedparser.parse(feed.url)
-        except Exception as e:  # noqa: BLE001 - 网络异常种类太多，统一兜底
-            log.warning("[%s] 抓取失败：%s", feed.name, e)
-            return []
+        parsed = feedparser.parse(raw)
     except Exception as e:  # noqa: BLE001
-        log.warning("[%s] 抓取失败：%s", feed.name, e)
+        log.warning("[%s] 解析失败：%s", feed.name, e)
         return []
 
     if getattr(parsed, "bozo", False) and not parsed.get("entries"):

@@ -221,6 +221,102 @@ def test_image_names_unique() -> None:
     check("无前缀时行为不变", ImageDownloader()._next_name("png") == "img0.png")
 
 
+def test_max_images_limit() -> None:
+    """max_images 必须真的截断图片数量（控制整本书的体积和耗时）。"""
+    print("\n[构建层-单篇图片上限]")
+    from genbooks.images import collect_image_urls
+
+    html = "".join(f'<img src="http://x/{i}.jpg"/>' for i in range(20))
+    check("不限制时取全部 20 个", len(collect_image_urls(html, 0)) == 20)
+    check("限制 5 个时只取 5 个", len(collect_image_urls(html, 5)) == 5)
+    check("限制生效且保留前几个", collect_image_urls(html, 3)[0].endswith("/0.jpg"))
+
+
+def test_prefetch_dedup() -> None:
+    """同一张图被多篇文章引用时，zip 里只能出现一份。
+
+    预下载按 URL 去重，多篇文章会拿到同一个 asset 对象；若每篇都
+    book.add_item，zip 里会出现重名条目，后写的覆盖先写的。
+    """
+    print("\n[构建层-图片跨文章去重]")
+    import genbooks.builder as B
+    from genbooks.images import ImageAsset
+
+    shared = ImageAsset(name="g0_img0.jpg", media_type="image/jpeg", data=b"x")
+    orig_prefetch = B._prefetch_images
+    orig_body = B._article_body
+    B._prefetch_images = lambda chapters: {"http://x/a.jpg": shared}
+    # 两篇文章都引用同一张图
+    B._article_body = lambda post, chapter, dl, pf=None: (
+        '<p>x</p><img src="images/g0_img0.jpg"/>',
+        [shared],
+    )
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            posts = [
+                Post(datetime(2026, 10, 21, 7, 0, tzinfo=timezone.utc), "源A", "A", "a", "l", "<p>1</p>"),
+                Post(datetime(2026, 10, 21, 6, 0, tzinfo=timezone.utc), "源A", "B", "a", "l", "<p>2</p>"),
+            ]
+            out = build_epub("去重", [Chapter(title="源A", posts=posts, saveimg=True)], Path(td) / "d.epub")
+            names = zipfile.ZipFile(out).namelist()
+            imgs = [n for n in names if "/images/" in n]
+            check("共享图片只写入一份", len(imgs) == 1, str(imgs))
+    finally:
+        B._prefetch_images = orig_prefetch
+        B._article_body = orig_body
+
+
+def test_custom_css_applied() -> None:
+    """自定义 css 必须真的出现在产物里。
+
+    回归点：ebooklib 的 EpubHtml.get_content() 会丢弃原文档整个 head，
+    只重建成 title/meta/links。曾经把 <style> 写在 head 里，配置了 css
+    但阅读器里毫无效果，属于静默失效。
+    """
+    print("\n[构建层-自定义CSS生效]")
+    with tempfile.TemporaryDirectory() as td:
+        my_css = "span.bio{font-size:0.7em;}div.question{margin-bottom:2cm;}"
+        p = [Post(datetime(2026, 10, 21, 7, 0, tzinfo=timezone.utc), "源A", "标题", "a", "l", "<p>x</p>")]
+        plain = [Post(datetime(2026, 10, 21, 6, 0, tzinfo=timezone.utc), "源B", "标题B", "a", "l", "<p>y</p>")]
+        out = build_epub(
+            "css书",
+            [
+                Chapter(title="源A", posts=p, css=my_css),
+                Chapter(title="源B", posts=plain),
+            ],
+            Path(td) / "c.epub",
+        )
+        z = zipfile.ZipFile(out)
+        names = z.namelist()
+        css_files = [n for n in names if n.endswith(".css")]
+        check("为自定义源的 css 生成独立样式表", any("css/g0.css" in n for n in css_files), str(css_files))
+
+        g0 = z.read([n for n in css_files if "g0.css" in n][0]).decode() if any("g0.css" in n for n in css_files) else ""
+        check("样式表内含用户 css 原文", "margin-bottom:2cm" in g0, g0[:60])
+
+        # 该源的章节必须引用它
+        art = z.read("EPUB/g0_a0.xhtml").decode()
+        check("该源章节引用了自定义样式", "g0.css" in art, art[:200])
+
+        # 没有 css 的源不应被牵连
+        art_b = z.read("EPUB/g1_a0.xhtml").decode()
+        check("无 css 的源不引用它", "g0.css" not in art_b)
+
+
+def test_saveimg_toggle() -> None:
+    """saveimg=false 时必须剥离图片，且不产生图片文件。"""
+    print("\n[构建层-图片开关]")
+    with tempfile.TemporaryDirectory() as td:
+        html = '<p>文字</p><img src="http://127.0.0.1:9/x.jpg"/>'
+        p = [Post(datetime(2026, 10, 21, 7, 0, tzinfo=timezone.utc), "源A", "标题", "a", "l", html)]
+        out = build_epub("无图书", [Chapter(title="源A", posts=p, saveimg=False)], Path(td) / "n.epub")
+        z = zipfile.ZipFile(out)
+        art = z.read("EPUB/g0_a0.xhtml").decode()
+        check("saveimg=false 时正文无 img", "<img" not in art)
+        check("saveimg=false 时保留文字", "文字" in art)
+        check("saveimg=false 时不生成图片文件", not any("/images/" in n for n in z.namelist()))
+
+
 # ------------------------------------------------------------------ 投递层
 
 
@@ -278,7 +374,7 @@ def main() -> int:
     print("=" * 60)
     print("GenBooks 冒烟测试")
     print("=" * 60)
-    for fn in (test_config, test_time, test_builder, test_single_article_no_group, test_multi_source_all_grouped, test_image_names_unique, test_delivery):
+    for fn in (test_config, test_time, test_builder, test_single_article_no_group, test_multi_source_all_grouped, test_image_names_unique, test_max_images_limit, test_prefetch_dedup, test_custom_css_applied, test_saveimg_toggle, test_delivery):
         try:
             fn()
         except Exception as e:  # noqa: BLE001

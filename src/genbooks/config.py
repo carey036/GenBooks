@@ -33,6 +33,9 @@ class FeedConfig:
     saveimg: bool = False
     imgquality: int = 100
     css: str = ""
+    # 单篇文章最多保留几张图（0 = 不限）。知乎/第一财经这类源一篇就
+    # 二三十张图，全下下来一本书能到 100MB 以上，既慢又占 Kindle 空间。
+    max_images: int = 0
 
 
 @dataclass
@@ -149,6 +152,7 @@ def _parse_feed(raw: dict) -> FeedConfig:
         saveimg=_as_bool(raw.get("saveimg"), False),
         imgquality=max(0, min(100, _as_int(raw.get("imgquality"), 100))),
         css=str(raw.get("css") or ""),
+        max_images=max(0, _as_int(raw.get("max_images"), 0)),
     )
 
 
