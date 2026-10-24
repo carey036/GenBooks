@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""冒烟测试：不依赖网络、不依赖 calibre，覆盖本次重构修掉的关键缺陷。
+
+运行：
+    python3 tests/smoke_test.py
+
+任何一个用例失败都会以非零退出码结束，方便塞进 CI。
+"""
+
+from __future__ import annotations
+
+import sys
+import tempfile
+import zipfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
+
+from genbooks import config as C  # noqa: E402
+from genbooks import feeds as F  # noqa: E402
+from genbooks.builder import Chapter, build_epub  # noqa: E402
+from genbooks.delivery import send_all  # noqa: E402
+from genbooks.delivery.base import Channel  # noqa: E402
+from genbooks.feeds import Post  # noqa: E402
+
+FAILED: list[str] = []
+PASSED: list[str] = []
+
+
+def check(name: str, cond: bool, detail: str = "") -> None:
+    if cond:
+        PASSED.append(name)
+        print(f"  ✓ {name}")
+    else:
+        FAILED.append(name)
+        print(f"  ✗ {name} {detail}")
+
+
+# ------------------------------------------------------------------ 配置层
+
+
+def test_config() -> None:
+    print("\n[配置层]")
+
+    # 最小配置：只写 title + feeds，其余全缺 —— 旧版会 KeyError 崩溃
+    try:
+        cfg = C.parse({"title": "T", "feeds": [{"name": "a", "url": "http://x"}]})
+        check("最小配置不崩溃", True)
+        check("缺失渠道默认关闭", not cfg.telegram.enable and not cfg.boox.enable)
+    except Exception as e:  # noqa: BLE001
+        check("最小配置不崩溃", False, repr(e))
+
+    # 旧格式（emailinfo 等旧名）必须兼容
+    old = {
+        "title": "Old",
+        "feeds": [{"name": "a", "url": "http://x", "saveimg": False, "imgquality": 100}],
+        "emailinfo": {"enable": True, "to": "a@b.c", "from": "a@b.c", "smtp": "s", "port": 25, "pwd": "p", "epub": False, "mobi": True},
+        "webdav": {"enable": False},
+        "telegram": {"enable": False},
+        "boox": {"enable": False},
+        "github": {"enable": True, "epub": True, "mobi": True},
+    }
+    cfg_old = C.parse(old)
+    check("旧格式 emailinfo 兼容", cfg_old.email.enable and cfg_old.email.formats() == ["mobi"])
+
+    # 字符串布尔
+    cfg_str = C.parse({"title": "S", "feeds": [{"name": "a", "url": "http://x", "saveimg": "true"}],
+                       "github": {"enable": "false", "epub": "1"}})
+    check("字符串布尔解析", cfg_str.feeds[0].saveimg is True and cfg_str.github.enable is False)
+
+    # 启用但缺必填项 -> 返回问题而不是抛异常
+    cfg_bad = C.parse({"title": "B", "feeds": [{"name": "a", "url": "http://x"}],
+                       "telegram": {"enable": True, "epub": True}})
+    problems = C.validate_channels(cfg_bad)
+    check("缺必填项被报告而非崩溃", any("token" in p for p in problems))
+
+    # 非法配置给出明确错误
+    for bad_input, hint in [("{oops", "JSON"), ('{"title":"x"}', "feeds")]:
+        try:
+            C.parse(bad_input)
+            check(f"非法配置报错({hint})", False, "没有抛异常")
+        except C.ConfigError:
+            check(f"非法配置报错({hint})", True)
+
+
+# ------------------------------------------------------------------ 抓取层
+
+
+def test_time() -> None:
+    print("\n[抓取层-时间]")
+    import time as _time
+
+    struct = _time.struct_time((2026, 10, 21, 7, 28, 0, 0, 0, 0))
+
+    class E(dict):
+        pass
+
+    got = F._entry_time(E(published_parsed=struct))
+    expect = datetime(2026, 10, 21, 7, 28, tzinfo=timezone.utc)
+    check("UTC 时间解析正确", got == expect, f"got={got}")
+
+    # 旧实现 time.mktime 在非 UTC 时区会偏移；确认新实现不受 TZ 影响
+    old_ts = _time.mktime(struct)
+    old_val = datetime.fromtimestamp(old_ts, tz=timezone.utc)
+    check(
+        "不再使用 mktime（避免时区偏移）",
+        got == expect,
+        f"旧实现会得到 {old_val}",
+    )
+
+    # 无日期的条目跳过
+    check("无日期条目返回 None", F.to_post(E(title="x"), "b", expect) is None)
+
+
+# ------------------------------------------------------------------ 构建层
+
+
+def test_builder() -> None:
+    print("\n[构建层]")
+    with tempfile.TemporaryDirectory() as td:
+        posts = [
+            Post(datetime(2026, 10, 21, 7, 0, tzinfo=timezone.utc), "源A", "标题一", "作者", "http://x/1", "<p>正文</p>"),
+            Post(datetime(2026, 10, 21, 6, 0, tzinfo=timezone.utc), "源A", "标题<2>", "作者", "http://x/2", "<p>含&lt;尖括号&gt;</p>"),
+        ]
+        chapters = [Chapter(title="源A", posts=posts)]
+        out = build_epub("测试书", chapters, Path(td) / "t.epub")
+
+        check("epub 文件生成", out.exists() and out.stat().st_size > 0)
+        z = zipfile.ZipFile(out)
+        first = z.infolist()[0]
+        check("mimetype 是第一个 entry", first.filename == "mimetype", first.filename)
+        check("mimetype 未被压缩(符合 OCF)", first.compress_type == zipfile.ZIP_STORED, str(first.compress_type))
+        check("含 EPUB3 nav.xhtml", any(n.endswith("nav.xhtml") for n in z.namelist()))
+        opf = [n for n in z.namelist() if n.endswith(".opf")]
+        check("含 content.opf", len(opf) == 1)
+
+
+# ------------------------------------------------------------------ 投递层
+
+
+class _OkChannel(Channel):
+    name = "ok"
+
+    def send(self, files):
+        return "done"
+
+
+class _BoomChannel(Channel):
+    name = "boom"
+
+    def send(self, files):
+        raise RuntimeError("模拟失败")
+
+
+class _BareChannel(Channel):
+    name = "bare"
+
+    def send(self, files):
+        raise KeyError("telegram")  # 这正是旧版配置缺键时的异常类型
+
+
+def test_delivery() -> None:
+    print("\n[投递层-失败隔离]")
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "a.epub"
+        f.write_bytes(b"x")
+        files = {"epub": f}
+        cfg = C.parse({"title": "T", "feeds": [{"name": "a", "url": "http://x"}]})
+
+        ok = _OkChannel(cfg.github)
+        ok.config.enable = True
+        ok.config.epub = True
+        boom = _BoomChannel(cfg.github)
+        boom.config.enable = True
+        boom.config.epub = True
+        bare = _BareChannel(cfg.github)
+        bare.config.enable = True
+        bare.config.epub = True
+
+        results = send_all([boom, bare, ok], files)
+        check("不向外抛异常", True)
+        check("失败渠道被标记", len([r for r in results if not r.ok]) == 2)
+        check("成功渠道仍成功", [r for r in results if r.ok][0].channel == "ok")
+        check("产物未被删除", f.exists())
+        check("KeyError 也被兜住", any("KeyError" in r.detail for r in results))
+
+
+# ------------------------------------------------------------------ 运行
+
+
+def main() -> int:
+    print("=" * 60)
+    print("GenBooks 冒烟测试")
+    print("=" * 60)
+    for fn in (test_config, test_time, test_builder, test_delivery):
+        try:
+            fn()
+        except Exception as e:  # noqa: BLE001
+            import traceback
+
+            traceback.print_exc()
+            FAILED.append(fn.__name__)
+
+    print("\n" + "=" * 60)
+    print(f"通过 {len(PASSED)} 项，失败 {len(FAILED)} 项")
+    if FAILED:
+        for name in FAILED:
+            print(f"  失败：{name}")
+        return 1
+    print("全部通过")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -2,39 +2,83 @@ name: 生成书籍
 
 on:
   schedule:
-    # * is a special character in YAML so you have to quote this string
-    - cron:  '0 22 * * *' # 6:00,18:00 （GMT+8）
+    # UTC 时间。北京时间 06:00 = 前一天 UTC 22:00
+    - cron: '0 22 * * *'
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只生成、不投递（调试用）'
+        required: false
+        default: 'false'
+      lookback_hours:
+        description: '回溯多少小时（留空则用增量状态）'
+        required: false
+        default: ''
+
+# 同一时间只允许一个实例，避免两次运行同时改工作区
+concurrency:
+  group: genbooks
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+
     steps:
-    - uses: actions/checkout@v2
-    - name: 初始化Python
-      uses: actions/setup-python@v2
-      with:
-        python-version: 3.10.x
-    - name: 配置环境
-      run: |
-        sudo apt update
-        sudo apt install libegl1 libopengl0
-        sudo -v && wget -nv -O- https://download.calibre-ebook.com/linux-installer.sh | sudo sh /dev/stdin
-        pip3 install requests
-        pip3 install pytz
-        pip3 install feedparser
-        pip3 install pillow
-        pip3 install bs4
-        pip3 install oss2
-    - name: 执行程序
-      run: |
-        python3 ./src/genBook.py
-      env: 
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 初始化 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安装 Python 依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 安装 calibre（提供 ebook-convert）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libegl1 libopengl0
+          sudo -v && wget -nv -O- https://download.calibre-ebook.com/linux-installer.sh | sudo sh /dev/stdin
+
+      - name: 生成书籍
+        env:
           config: ${{ secrets.CONFIG }}
-    - name: update to repo
-      run: |
-        git config --global user.name ${{ secrets.GITHUBUSER }}
-        git config --global user.email ${{ secrets.GITHUBEMAIL }}
-        git add . && echo 添加变动文件
-        git commit -m 'update to repo' && echo commit
-        git push origin main && echo push!
+          LOOKBACK_HOURS: ${{ github.event.inputs.lookback_hours }}
+        run: |
+          EXTRA_ARGS=""
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --dry-run"
+          fi
+          if [ -n "$LOOKBACK_HOURS" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --lookback $LOOKBACK_HOURS"
+          fi
+          python3 src/genBook.py $EXTRA_ARGS
+
+      - name: 上传产物（便于排查，保留 30 天）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: books
+          path: output/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: 提交更新到仓库
+        run: |
+          git config user.name  "${{ secrets.GITHUBUSER }}"
+          git config user.email "${{ secrets.GITHUBEMAIL }}"
+          git add output/ config/last_run.txt
+          if git diff --cached --quiet; then
+            echo "没有变更，跳过提交"
+            exit 0
+          fi
+          git commit -m "chore: 更新书籍 $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push

@@ -1,1 +1,20 @@
-src/__pycache__/*
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 生成的书籍产物
+# 注意：如果你希望仓库里保存成书（GithubChannel 的用法），
+# 请把 output/ 和 *.epub / *.mobi 这几行删掉。
+output/
+temp/
+temp*.epub
+temp*.mobi
+
+# 运行状态
+config/last_run.txt
+config.txt
+
+# 本地真实配置（含密码，不要提交）
+config/rss.local.conf
+.env

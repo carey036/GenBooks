@@ -1,0 +1,13 @@
+# 运行环境
+pytz==2024.2
+feedparser==6.0.11
+requests==2.32.3
+beautifulsoup4==4.12.3
+Pillow==10.4.0
+oss2==2.19.1
+ebooklib>=0.18,<0.20
+
+# 备注：
+# - oss2 只在启用 boox 渠道时才真正用到，但它依赖较重（crcmod），
+#   如果你不用 Boox，可以注释掉以加快 CI。
+# - mobi 转换需要系统安装 calibre（提供 ebook-convert 命令），不由 pip 管理。
